@@ -728,15 +728,37 @@ class _NameField extends StatefulWidget {
 
 class _NameFieldState extends State<_NameField> {
   late final TextEditingController _controller;
+  late final FocusNode _focusNode;
 
   @override
   void initState() {
     super.initState();
     _controller = TextEditingController(text: widget.initial);
+    _focusNode = FocusNode()..addListener(_onFocusChange);
+  }
+
+  @override
+  void didUpdateWidget(covariant _NameField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.initial != widget.initial &&
+        _controller.text != widget.initial) {
+      _controller.text = widget.initial;
+    }
+  }
+
+  /// Commit the rename when the field loses focus, not just on the keyboard
+  /// "done" keystroke — otherwise edits are silently dropped when the user
+  /// taps away instead of pressing done.
+  void _onFocusChange() {
+    if (!_focusNode.hasFocus) {
+      widget.onSubmitted(_controller.text);
+    }
   }
 
   @override
   void dispose() {
+    _focusNode.removeListener(_onFocusChange);
+    _focusNode.dispose();
     _controller.dispose();
     super.dispose();
   }
@@ -745,6 +767,7 @@ class _NameFieldState extends State<_NameField> {
   Widget build(BuildContext context) {
     return TextField(
       controller: _controller,
+      focusNode: _focusNode,
       maxLength: 14,
       style: ArtisanType.bodyText(size: 15),
       decoration: InputDecoration(

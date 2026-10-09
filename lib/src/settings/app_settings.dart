@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../ai/mancala_ai.dart';
@@ -31,7 +33,13 @@ class AppSettings extends ChangeNotifier {
   static const _kLosses = 'mancala.losses';
   static const _kDraws = 'mancala.draws';
   static const _kBestMargin = 'mancala.best_margin';
-  static const _kNames = 'mancala.player_names'; // StringList, 2 entries
+  static const _kNames = 'mancala.player_names'; // legacy unordered StringSet key
+
+  /// Order-safe player-name storage: a single JSON string. Android's
+  /// SharedPreferences stores StringLists as an unordered StringSet, so the
+  /// old key scrambled name order on every app restart. Never use a
+  /// StringList for ordered data on Android.
+  static const _kNamesJson = 'mancala_player_names_json';
   static const _kTheme = 'mancala.theme_id';
   static const _kStoneStyle = 'mancala.stone_style';
   static const _kAccent = 'mancala.accent';
@@ -42,6 +50,26 @@ class AppSettings extends ChangeNotifier {
   static const _kCustomPrefix = 'mancala_custom_';
 
   static const defaultNames = ['Player 1', 'Player 2'];
+
+  /// Encode the 2 player names as one JSON string (order-preserving).
+  static String encodePlayerNames(List<String> names) => jsonEncode(names);
+
+  static String _cleanName(int i, Object? v) {
+    final s = v is String ? v.trim() : '';
+    return s.isEmpty ? defaultNames[i] : s;
+  }
+
+  /// Decode persisted names; falls back to defaults on missing/corrupt data.
+  static List<String> decodePlayerNames(String? raw) {
+    if (raw == null) return List.of(defaultNames);
+    try {
+      final d = jsonDecode(raw);
+      if (d is List && d.length == 2) {
+        return [for (int i = 0; i < 2; i++) _cleanName(i, d[i])];
+      }
+    } catch (_) {}
+    return List.of(defaultNames);
+  }
 
   final SharedPreferencesAsync _prefs = SharedPreferencesAsync();
 
@@ -105,12 +133,19 @@ class AppSettings extends ChangeNotifier {
     vibration = await _prefs.getBool(_kVibration) ?? true;
     final d = await _prefs.getInt(_kDifficulty) ?? BotDifficulty.sharp.index;
     difficulty = BotDifficulty.values[d.clamp(0, 2)];
-    final names = await _prefs.getStringList(_kNames);
-    if (names != null && names.length == 2) {
-      playerNames = [
-        for (int i = 0; i < 2; i++)
-          names[i].trim().isEmpty ? defaultNames[i] : names[i].trim()
-      ];
+    // Player names: prefer the order-safe JSON key. One-time migration from
+    // the legacy StringList key (Android backed it with an unordered
+    // StringSet, which is exactly the bug this replaces).
+    final namesRaw = await _prefs.getString(_kNamesJson);
+    if (namesRaw != null) {
+      playerNames = decodePlayerNames(namesRaw);
+    } else {
+      final legacy = await _prefs.getStringList(_kNames);
+      playerNames = legacy != null
+          ? decodePlayerNames(jsonEncode(legacy))
+          : List.of(defaultNames);
+      // Persist through the order-safe key now and drop the legacy key.
+      await _saveNames();
     }
     themeId = await _prefs.getString(_kTheme) ?? 'heirloom';
     stoneStyle = (await _prefs.getInt(_kStoneStyle) ?? 0)
@@ -332,12 +367,19 @@ class AppSettings extends ChangeNotifier {
     await _save(_kMixedBotSeat, mixedBotSeat);
   }
 
+  /// Persists names through the order-safe JSON key and drops the legacy
+  /// unordered StringList key for good.
+  Future<void> _saveNames() async {
+    await _prefs.setString(_kNamesJson, encodePlayerNames(playerNames));
+    await _prefs.remove(_kNames);
+  }
+
   Future<void> setPlayerName(int seat, String name) async {
     if (seat < 0 || seat > 1) return;
     final clean = name.trim();
     playerNames[seat] = clean.isEmpty ? defaultNames[seat] : clean;
     notifyListeners();
-    await _prefs.setStringList(_kNames, playerNames);
+    await _saveNames();
   }
 
   /// Display name for a seat, with a BOT tag when a bot plays it.
@@ -431,7 +473,7 @@ class AppSettings extends ChangeNotifier {
     await _save(_kSfxVol, 0.8);
     await _save(_kVibration, true);
     await _save(_kDifficulty, BotDifficulty.sharp.index);
-    await _prefs.setStringList(_kNames, playerNames);
+    await _saveNames();
     await _save(_kTheme, themeId);
     await _save(_kStoneStyle, stoneStyle);
     await _save(_kAccent, accent);
