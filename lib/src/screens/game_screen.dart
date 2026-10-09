@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -8,18 +9,26 @@ import '../artisan/palette.dart';
 import '../artisan/widgets.dart';
 import '../audio/audio_service.dart';
 import '../engine/mancala_engine.dart';
+import '../services/store_service.dart';
 import '../settings/app_settings.dart';
 import 'game_over.dart';
 import 'settings_screen.dart';
 
+/// Engine-owned turn phases. The UI never advances the game on its own
+/// timers: every transition flows through [_setPhase], and the watchdog
+/// recovers any phase that stops making progress.
+enum _Phase { idle, animating, settling, botThinking, over }
+
 /// Artisan Mancala game board (portrait): opponent plate — walnut slab with
 /// 2×6 concave pits and 2 end stores — turn banner — own plate + controls.
-/// Stones sow one at a time with weight; captures pop; illegal taps shake.
+///
+/// Stones sow one at a time with weight; bot turns animate fully and are
+/// narrated; illegal taps shake. A watchdog guarantees no stuck states.
 class GameScreen extends StatefulWidget {
   final AppSettings settings;
-  final bool vsBot;
+  final StoreService store;
 
-  const GameScreen({super.key, required this.settings, required this.vsBot});
+  const GameScreen({super.key, required this.settings, required this.store});
 
   @override
   State<GameScreen> createState() => _GameScreenState();
@@ -31,15 +40,18 @@ class _GameScreenState extends State<GameScreen>
   late List<int> _shown; // animated board
   final _rng = Random();
 
-  bool _sowing = false;
+  _Phase _phase = _Phase.idle;
   bool _paused = false;
   bool _over = false;
+  bool _botScheduled = false;
   int _moveToken = 0; // invalidates in-flight bot turns on restart
   int _round = 1;
   int _shakeToken = 0;
   int _shakePit = -1;
   int _popToken = 0;
   int _popPit = -1;
+  DateTime _lastAdvance = DateTime.now();
+  Timer? _watchdog;
 
   // Match stats.
   int _captures = 0;
@@ -49,13 +61,14 @@ class _GameScreenState extends State<GameScreen>
   String _banner = '';
   late AnimationController _pulse;
 
-  String get _p0Name => widget.vsBot ? 'YOU' : 'PLAYER 1';
-  String get _p1Name => widget.vsBot ? 'BOT' : 'PLAYER 2';
-  String get _p0Mineral => widget.vsBot ? 'amber fire' : 'ember amber';
-  String get _p1Mineral => widget.vsBot ? 'jade mineral' : 'deep jade';
-  bool get _botTurn => widget.vsBot && _engine.turn == 1 && !_over;
+  Set<int> get _botSeats => widget.settings.botSeats;
+  String _seatName(int seat) => widget.settings.seatName(seat);
+  bool get _botTurn =>
+      !_over && _botSeats.contains(_engine.turn) && _phase == _Phase.idle;
   bool get _humanTurn =>
-      !_over && !_sowing && (widget.vsBot ? _engine.turn == 0 : true);
+      !_over &&
+      _phase == _Phase.idle &&
+      !_botSeats.contains(_engine.turn);
 
   @override
   void initState() {
@@ -67,14 +80,18 @@ class _GameScreenState extends State<GameScreen>
         vsync: this, duration: const Duration(milliseconds: 1400))
       ..repeat(reverse: true);
     _banner = _turnBannerText();
+    AudioService.instance.gameMusic();
+    _watchdog = Timer.periodic(const Duration(seconds: 1), (_) => _watch());
     WidgetsBinding.instance.addPostFrameCallback((_) => _maybeBotMove());
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _watchdog?.cancel();
     _pulse.dispose();
     _moveToken++; // cancel any in-flight bot turn
+    AudioService.instance.menuMusic();
     super.dispose();
   }
 
@@ -85,20 +102,62 @@ class _GameScreenState extends State<GameScreen>
     }
   }
 
+  // ------------------------------------------------------- phase + watchdog
+  void _setPhase(_Phase p) {
+    _phase = p;
+    _lastAdvance = DateTime.now();
+  }
+
+  void _touch() {
+    _lastAdvance = DateTime.now();
+  }
+
+  /// Watchdog: every second, verify the turn machine is making progress.
+  /// - A bot turn with no scheduled move for > 2.5s gets re-scheduled.
+  /// - Any non-idle phase silent for > 10s is force-settled back to idle.
+  /// Stuck states are impossible by construction.
+  void _watch() {
+    if (!mounted || _over || _paused) return;
+    final silent = DateTime.now().difference(_lastAdvance);
+    if (_phase == _Phase.idle) {
+      if (_botSeats.contains(_engine.turn) &&
+          !_botScheduled &&
+          silent > const Duration(milliseconds: 2500)) {
+        _maybeBotMove();
+      }
+      return;
+    }
+    if (silent > const Duration(seconds: 10)) {
+      debugPrint('Mancala watchdog: recovering stuck phase $_phase');
+      _recover();
+    }
+  }
+
+  void _recover() {
+    _moveToken++;
+    _botScheduled = false;
+    _shown = List<int>.from(_engine.board);
+    _setPhase(_Phase.idle);
+    if (mounted) {
+      setState(() => _banner = _turnBannerText());
+      _maybeBotMove();
+    }
+  }
+
+  // ------------------------------------------------------------------ text
   String _turnBannerText() {
     if (_over) return '';
-    if (widget.vsBot) {
-      return _engine.turn == 0
-          ? '◆  Your turn — tap an illuminated pit to sow  ◆'
-          : '◆  BOT is studying the board…  ◆';
+    final name = _seatName(_engine.turn);
+    if (_botSeats.contains(_engine.turn)) {
+      return '◆  $name is studying the board…  ◆';
     }
-    return '◆  ${_engine.turn == 0 ? _p0Name : _p1Name} — tap a glowing pit to sow  ◆';
+    return '◆  $name — tap a glowing pit to sow  ◆';
   }
 
   // ------------------------------------------------------------------ moves
   Future<void> _onPitTap(int pit) async {
-    if (_over || _sowing || _paused) return;
-    if (widget.vsBot && _engine.turn == 1) return; // bot thinking
+    if (_over || _phase != _Phase.idle || _paused) return;
+    if (_botSeats.contains(_engine.turn)) return; // bot thinking
     if (!_engine.isLegal(pit)) {
       _illegalTap(pit);
       return;
@@ -124,10 +183,18 @@ class _GameScreenState extends State<GameScreen>
 
   Future<void> _doMove(int pit) async {
     final token = _moveToken;
-    _sowing = true;
-    final path = _engine.sowPath(pit);
-    final result = _engine.sow(pit);
+    _setPhase(_Phase.animating);
+    MoveResult result;
+    List<int> path;
+    try {
+      path = _engine.sowPath(pit);
+      result = _engine.sow(pit);
+    } catch (_) {
+      _recover();
+      return;
+    }
 
+    final mover = _seatName(result.player);
     _sownStones += result.hand;
     if (result.captured > 0) _captures += result.captured;
     if (result.freeTurn) _freeTurns++;
@@ -135,59 +202,66 @@ class _GameScreenState extends State<GameScreen>
     AudioService.instance.scoop();
     setState(() {
       _shown[pit] = 0;
-      _banner = '◆  Sowing ${result.hand} stones…  ◆';
+      _banner = '◆  $mover sows ${result.hand} stones…  ◆';
     });
 
-    // Drop stones one at a time around the board.
-    for (final dest in path) {
-      await Future.delayed(const Duration(milliseconds: 210));
+    // Drop stones one at a time around the board — fully visible for bots.
+    try {
+      for (final dest in path) {
+        await Future.delayed(const Duration(milliseconds: 210));
+        if (!mounted || token != _moveToken) return;
+        await _waitWhilePaused();
+        if (!mounted || token != _moveToken) return;
+        _touch();
+        setState(() {
+          _shown[dest]++;
+          _popPit = dest;
+          _popToken++;
+        });
+        AudioService.instance.sowDrop();
+        if (widget.settings.vibration) HapticFeedback.lightImpact();
+      }
+
+      await Future.delayed(const Duration(milliseconds: 320));
       if (!mounted || token != _moveToken) return;
       await _waitWhilePaused();
+
+      // Snap to the resolved board (captures / store landings settle).
+      _setPhase(_Phase.settling);
+      setState(() => _shown = List<int>.from(_engine.board));
+
+      if (result.captured > 0) {
+        AudioService.instance.capture();
+        if (widget.settings.vibration) HapticFeedback.mediumImpact();
+        setState(() => _banner =
+            '◆  $mover CAPTURES +${result.captured} stones!  ◆');
+        await Future.delayed(const Duration(milliseconds: 900));
+      } else if (result.freeTurn) {
+        AudioService.instance.freeTurn();
+        setState(
+            () => _banner = '◆  $mover lands in the store — bonus turn!  ◆');
+        await Future.delayed(const Duration(milliseconds: 700));
+      }
       if (!mounted || token != _moveToken) return;
-      setState(() {
-        _shown[dest]++;
-        _popPit = dest;
-        _popToken++;
-      });
-      AudioService.instance.sowDrop();
-      if (widget.settings.vibration) HapticFeedback.lightImpact();
+
+      if (result.gameOver) {
+        await _finishGame(token);
+        return;
+      }
+
+      if (result.player == 1 && _engine.turn == 0) _round++;
+      _setPhase(_Phase.idle);
+      if (!mounted || token != _moveToken) return;
+      setState(() => _banner = _turnBannerText());
+      _maybeBotMove();
+    } catch (_) {
+      _recover();
     }
-
-    await Future.delayed(const Duration(milliseconds: 320));
-    if (!mounted || token != _moveToken) return;
-    await _waitWhilePaused();
-
-    // Snap to the resolved board (captures / store landings settle).
-    setState(() => _shown = List<int>.from(_engine.board));
-
-    if (result.captured > 0) {
-      AudioService.instance.capture();
-      if (widget.settings.vibration) HapticFeedback.mediumImpact();
-      setState(() => _banner =
-          '◆  CAPTURE! +${result.captured} stones into your store  ◆');
-      await Future.delayed(const Duration(milliseconds: 900));
-    } else if (result.freeTurn) {
-      AudioService.instance.freeTurn();
-      setState(() => _banner = '◆  Store landing — bonus turn!  ◆');
-      await Future.delayed(const Duration(milliseconds: 700));
-    }
-    if (!mounted || token != _moveToken) return;
-
-    if (result.gameOver) {
-      await _finishGame(token);
-      return;
-    }
-
-    if (result.player == 1 && _engine.turn == 0) _round++;
-    _sowing = false;
-    if (!mounted || token != _moveToken) return;
-    setState(() => _banner = _turnBannerText());
-    _maybeBotMove();
   }
 
   Future<void> _finishGame(int token) async {
+    _setPhase(_Phase.over);
     _over = true;
-    _sowing = false;
     // Sweep animation: remaining pits empty into the stores one by one.
     setState(() => _banner = '◆  Final sweep — gathering the harvest…  ◆');
     for (var i = 0; i < 14; i++) {
@@ -196,6 +270,7 @@ class _GameScreenState extends State<GameScreen>
         await Future.delayed(const Duration(milliseconds: 55));
         if (!mounted || token != _moveToken) return;
         await _waitWhilePaused();
+        _touch();
         setState(() {
           _shown[i]--;
           _shown[i < 6 ? 6 : 13]++;
@@ -211,15 +286,19 @@ class _GameScreenState extends State<GameScreen>
     final s1 = _engine.board[MancalaEngine.storeOf(1)];
     final winner = _engine.winner;
 
-    // Persist vs-bot results for the menu rank.
-    if (widget.vsBot) {
-      final outcome = winner == null ? 0 : (winner == 0 ? 1 : -1);
+    // Persist results when a human took part (solo / mixed).
+    final mode = widget.settings.mode;
+    if (mode == GameMode.solo || mode == GameMode.mixed) {
+      final humanSeat =
+          mode == GameMode.solo ? widget.settings.humanSide : 1 - widget.settings.mixedBotSeat;
+      final outcome =
+          winner == null ? 0 : (winner == humanSeat ? 1 : -1);
       widget.settings.recordBotResult(outcome, (s0 - s1).abs());
     }
 
     if (winner == null) {
       AudioService.instance.freeTurn();
-    } else if (!widget.vsBot || winner == 0) {
+    } else if (!_botSeats.contains(winner)) {
       AudioService.instance.win();
       if (widget.settings.vibration) HapticFeedback.heavyImpact();
     } else {
@@ -232,9 +311,9 @@ class _GameScreenState extends State<GameScreen>
       MaterialPageRoute(
         builder: (_) => GameOverScreen(
           settings: widget.settings,
-          vsBot: widget.vsBot,
-          p0Name: _p0Name,
-          p1Name: _p1Name,
+          store: widget.store,
+          p0Name: _seatName(0),
+          p1Name: _seatName(1),
           score0: s0,
           score1: s1,
           winner: winner,
@@ -249,14 +328,24 @@ class _GameScreenState extends State<GameScreen>
 
   // -------------------------------------------------------------------- bot
   void _maybeBotMove() {
-    if (!_botTurn || _sowing || _paused) return;
+    if (!_botTurn || _botScheduled || _paused) return;
+    _botScheduled = true;
+    _setPhase(_Phase.botThinking);
     final token = _moveToken;
-    Future.delayed(const Duration(milliseconds: 750), () async {
-      if (!mounted || token != _moveToken || !_botTurn || _sowing || _paused) {
+    final thinkMs = _rng.nextInt(400) + 650;
+    Future.delayed(Duration(milliseconds: thinkMs), () async {
+      if (!mounted || token != _moveToken || _paused) {
+        _botScheduled = false;
+        if (_phase == _Phase.botThinking) _setPhase(_Phase.idle);
         return;
       }
       final pit = await _computeBotPit();
-      if (!mounted || token != _moveToken || pit < 0) return;
+      _botScheduled = false;
+      if (!mounted || token != _moveToken || pit < 0) {
+        if (_phase == _Phase.botThinking) _setPhase(_Phase.idle);
+        return;
+      }
+      if (_phase == _Phase.botThinking) _setPhase(_Phase.idle);
       await _doMove(pit);
     });
   }
@@ -269,7 +358,7 @@ class _GameScreenState extends State<GameScreen>
         return await compute(_botCompute, <dynamic>[
           List<int>.from(_engine.board),
           _engine.turn,
-          1,
+          _engine.turn,
           difficulty.index,
           _rng.nextInt(1 << 30),
         ]);
@@ -277,7 +366,7 @@ class _GameScreenState extends State<GameScreen>
         // Fall through to a fast local choice.
       }
     }
-    return chooseBotMove(_engine, 1, difficulty, _rng);
+    return chooseBotMove(_engine, _engine.turn, difficulty, _rng);
   }
 
   // ------------------------------------------------------------- pause/menu
@@ -295,6 +384,7 @@ class _GameScreenState extends State<GameScreen>
             _paused = false;
             _banner = _turnBannerText();
           });
+          _touch();
           _maybeBotMove();
         },
         onRestart: () {
@@ -316,7 +406,7 @@ class _GameScreenState extends State<GameScreen>
       _moveToken++; // cancel in-flight bot turn / sow loop
       _engine = MancalaEngine.fresh();
       _shown = List<int>.from(_engine.board);
-      _sowing = false;
+      _botScheduled = false;
       _paused = false;
       _over = false;
       _round = 1;
@@ -325,6 +415,7 @@ class _GameScreenState extends State<GameScreen>
       _sownStones = 0;
       _banner = _turnBannerText();
     });
+    _setPhase(_Phase.idle);
     _maybeBotMove();
   }
 
@@ -358,8 +449,8 @@ class _GameScreenState extends State<GameScreen>
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 14),
               child: PlayerPlate(
-                name: _p1Name,
-                mineral: _p1Mineral,
+                name: _seatName(1),
+                mineral: widget.settings.activeStones.name,
                 dotKind: StoneKind.jade,
                 count: _engine.board[MancalaEngine.storeOf(1)],
                 active: !_over && _engine.turn == 1,
@@ -375,8 +466,8 @@ class _GameScreenState extends State<GameScreen>
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 14),
               child: PlayerPlate(
-                name: _p0Name,
-                mineral: _p0Mineral,
+                name: _seatName(0),
+                mineral: widget.settings.activeStones.name,
                 dotKind: StoneKind.amber,
                 count: _engine.board[MancalaEngine.storeOf(0)],
                 active: !_over && _engine.turn == 0,
@@ -406,7 +497,7 @@ class _GameScreenState extends State<GameScreen>
             child: Column(
               children: [
                 Text('Kalah', style: ArtisanType.plaqueTitle(size: 20)),
-                Text('ANCESTRAL BOARD',
+                Text(widget.settings.modeLabel,
                     style: ArtisanType.label(size: 9)),
               ],
             ),
@@ -416,7 +507,8 @@ class _GameScreenState extends State<GameScreen>
             size: 40,
             onTap: () => Navigator.of(context).push(
               MaterialPageRoute(
-                builder: (_) => SettingsScreen(settings: widget.settings),
+                builder: (_) => SettingsScreen(
+                    settings: widget.settings, store: widget.store),
               ),
             ),
           ),
@@ -439,11 +531,10 @@ class _GameScreenState extends State<GameScreen>
         return Center(
           child: Container(
             width: slabW,
-            padding: EdgeInsets.symmetric(horizontal: pad, vertical: 12),
+            padding: const EdgeInsets.symmetric(horizontal: pad, vertical: 12),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(18),
-              border:
-                  Border.all(color: ArtisanPalette.woodEdge, width: 1.5),
+              border: Border.all(color: ArtisanPalette.woodEdge, width: 1.5),
               boxShadow: const [
                 BoxShadow(
                     color: Colors.black87,
@@ -467,7 +558,7 @@ class _GameScreenState extends State<GameScreen>
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            const EngravedTag(text: 'BOT PITS  ←'),
+                            EngravedTag(text: '${_seatName(1)}  ←'),
                             const SizedBox(height: 6),
                             Row(
                               children: [
@@ -490,7 +581,7 @@ class _GameScreenState extends State<GameScreen>
                             const SizedBox(height: 6),
                             EngravedTag(
                                 text:
-                                    'YOUR PITS  →   (${_shown.sublist(0, 6).fold(0, (a, b) => a + b)})'),
+                                    '${_seatName(0)}  →   (${_shown.sublist(0, 6).fold(0, (a, b) => a + b)})'),
                           ],
                         ),
                       ),
@@ -545,7 +636,7 @@ class _GameScreenState extends State<GameScreen>
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        EngravedTag(text: owner == 0 ? 'YOU' : 'BOT'),
+        EngravedTag(text: _seatName(owner).split(' ·').first),
         const SizedBox(height: 4),
         Container(
           width: w,
@@ -570,8 +661,7 @@ class _GameScreenState extends State<GameScreen>
         ),
         const SizedBox(height: 4),
         Container(
-          padding:
-              const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(6),
             gradient: const LinearGradient(
@@ -764,8 +854,7 @@ class _PitViewState extends State<_PitView>
         final shakeX = _shake.value == 0
             ? 0.0
             : sin(_shake.value * pi * 5) * 7 * (1 - _shake.value);
-        final popScale =
-            1.0 + sin(_pop.value * pi) * 0.22;
+        final popScale = 1.0 + sin(_pop.value * pi) * 0.22;
         final pulse = widget.pulse.value; // 0..1
         return Transform.translate(
           offset: Offset(shakeX, 0),

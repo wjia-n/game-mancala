@@ -14,10 +14,12 @@ class WoodSlabPainter extends CustomPainter {
   final int seed;
   final bool horizontalGrain;
 
+  // Defaults mirror the Heirloom Walnut theme; the palette is theme-driven
+  // at runtime, so callers that want themed slabs pass colors explicitly.
   const WoodSlabPainter({
-    this.top = ArtisanPalette.mahoganyLight,
-    this.mid = ArtisanPalette.walnutDark,
-    this.bottom = ArtisanPalette.walnutDeep,
+    this.top = const Color(0xFF442A18),
+    this.mid = const Color(0xFF3B2416),
+    this.bottom = const Color(0xFF2E1C0E),
     this.radius = 14,
     this.seed = 1,
     this.horizontalGrain = false,
@@ -133,10 +135,10 @@ class PitPainter extends CustomPainter {
           ..shader = RadialGradient(
             center: const Alignment(0, -0.35),
             radius: 0.95,
-            colors: const [
-              Color(0xFF150A04),
+            colors: [
+              const Color(0xFF150A04),
               ArtisanPalette.pitInner,
-              Color(0xFF060302),
+              const Color(0xFF060302),
             ],
             stops: const [0.0, 0.55, 1.0],
           ).createShader(rect));
@@ -340,15 +342,15 @@ class RivetPainter extends CustomPainter {
         c,
         r,
         Paint()
-          ..shader = const RadialGradient(
-            center: Alignment(-0.35, -0.4),
+          ..shader = RadialGradient(
+            center: const Alignment(-0.35, -0.4),
             radius: 1.1,
             colors: [
-              Color(0xFFE8C876),
+              const Color(0xFFE8C876),
               ArtisanPalette.brass,
-              Color(0xFF6E521F),
+              const Color(0xFF6E521F),
             ],
-            stops: [0.0, 0.55, 1.0],
+            stops: const [0.0, 0.55, 1.0],
           ).createShader(Rect.fromCircle(center: c, radius: r)));
     // Hammer dents.
     final rng = Random(5);

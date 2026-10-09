@@ -393,7 +393,7 @@ class NotchedSlider extends StatelessWidget {
                     height: 10,
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(5),
-                      gradient: const LinearGradient(colors: [
+                      gradient: LinearGradient(colors: [
                         ArtisanPalette.brass,
                         ArtisanPalette.amber
                       ]),

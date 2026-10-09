@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'src/artisan/palette.dart';
 import 'src/audio/audio_service.dart';
-import 'src/screens/main_menu.dart';
+import 'src/screens/splash_screen.dart';
+import 'src/services/store_service.dart';
 import 'src/settings/app_settings.dart';
 
 /// Mancala — Artisan Mancala edition.
@@ -28,23 +29,24 @@ Future<void> main() async {
   ]);
 
   final settings = await AppSettings.load();
+  settings.applyTheme();
+  final store = StoreService();
   final audio = AudioService.instance;
   audio.applySettings(settings);
-  // Synthesize the artisan sound set in the background; the menu appears
-  // immediately and music starts as soon as the first loop is ready.
-  audio.init().then((_) {
+  // The splash screen pre-warms synthesis and starts menu music.
+  settings.addListener(() {
+    settings.applyTheme();
     audio.applySettings(settings);
-    audio.menuMusic();
   });
-  settings.addListener(() => audio.applySettings(settings));
 
-  runApp(MancalaApp(settings: settings));
+  runApp(MancalaApp(settings: settings, store: store));
 }
 
 class MancalaApp extends StatefulWidget {
   final AppSettings settings;
+  final StoreService store;
 
-  const MancalaApp({super.key, required this.settings});
+  const MancalaApp({super.key, required this.settings, required this.store});
 
   @override
   State<MancalaApp> createState() => _MancalaAppState();
@@ -60,31 +62,41 @@ class _MancalaAppState extends State<MancalaApp> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    widget.store.dispose();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Duck all audio while backgrounded; the game screen auto-pauses itself.
-    AudioService.instance
-        .setDucked(state == AppLifecycleState.paused || state == AppLifecycleState.hidden);
+    // Pause (not stop) on interruption so music resumes exactly where it
+    // left off; game screens additionally freeze their engines.
+    AudioService.instance.setDucked(
+        state == AppLifecycleState.paused || state == AppLifecycleState.hidden);
   }
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Mancala',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        scaffoldBackgroundColor: ArtisanPalette.clay,
-        fontFamily: ArtisanType.body,
-        colorScheme: const ColorScheme.dark(
-          primary: ArtisanPalette.brass,
-          surface: ArtisanPalette.clay,
-        ),
-      ),
-      home: MainMenuScreen(settings: widget.settings),
+    return ListenableBuilder(
+      listenable: widget.settings,
+      builder: (_, _) {
+        // Theme changes re-skin the whole app via the applied palette.
+        widget.settings.applyTheme();
+        return MaterialApp(
+          title: 'Mancala',
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData(
+            useMaterial3: true,
+            scaffoldBackgroundColor: ArtisanPalette.clay,
+            fontFamily: ArtisanType.body,
+            colorScheme: ColorScheme.dark(
+              primary: ArtisanPalette.brass,
+              surface: ArtisanPalette.clay,
+            ),
+          ),
+          home: SplashScreen(
+              settings: widget.settings, store: widget.store),
+        );
+      },
     );
   }
 }

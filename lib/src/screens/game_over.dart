@@ -3,6 +3,7 @@ import '../artisan/painters.dart';
 import '../artisan/palette.dart';
 import '../artisan/widgets.dart';
 import '../audio/audio_service.dart';
+import '../services/store_service.dart';
 import '../settings/app_settings.dart';
 import 'game_screen.dart';
 
@@ -10,7 +11,7 @@ import 'game_screen.dart';
 /// carved banner → overflowing grand store → tally panels → match stats.
 class GameOverScreen extends StatefulWidget {
   final AppSettings settings;
-  final bool vsBot;
+  final StoreService store;
   final String p0Name;
   final String p1Name;
   final int score0;
@@ -24,7 +25,7 @@ class GameOverScreen extends StatefulWidget {
   const GameOverScreen({
     super.key,
     required this.settings,
-    required this.vsBot,
+    required this.store,
     required this.p0Name,
     required this.p1Name,
     required this.score0,
@@ -47,18 +48,23 @@ class _GameOverScreenState extends State<GameOverScreen>
 
   bool get _draw => widget.winner == null;
   bool get _humanWon =>
-      widget.winner != null && (!widget.vsBot || widget.winner == 0);
+      widget.winner != null &&
+      !widget.settings.botSeats.contains(widget.winner);
+  bool get _botWon =>
+      widget.winner != null &&
+      widget.settings.botSeats.contains(widget.winner);
 
   String get _bannerTitle {
     if (_draw) return 'DRAW';
     if (_humanWon) return 'VICTORY';
-    return 'DEFEAT';
+    if (_botWon) return 'DEFEAT';
+    return 'GAME OVER';
   }
 
   String get _bannerSub {
     if (_draw) return 'An honorable harvest, evenly split';
     if (_humanWon) return 'Your harvest is plentiful!';
-    if (widget.vsBot) return 'The bot out-harvested you this time';
+    if (_botWon) return 'The bot out-harvested you this time';
     return '${_winnerName()} takes the harvest!';
   }
 
@@ -129,7 +135,7 @@ class _GameOverScreenState extends State<GameOverScreen>
                   Navigator.of(context).pushReplacement(
                     MaterialPageRoute(
                       builder: (_) => GameScreen(
-                          settings: widget.settings, vsBot: widget.vsBot),
+                          settings: widget.settings, store: widget.store),
                     ),
                   );
                 },
@@ -249,7 +255,7 @@ class _GameOverScreenState extends State<GameOverScreen>
       children: [
         Expanded(
           child: _tally(
-            name: widget.vsBot ? 'YOU' : widget.p0Name,
+            name: widget.p0Name,
             score: widget.score0,
             player: 0,
             tag: widget.winner == 0 ? 'WINNER' : 'HARVEST',
@@ -259,7 +265,7 @@ class _GameOverScreenState extends State<GameOverScreen>
         const SizedBox(width: 12),
         Expanded(
           child: _tally(
-            name: widget.vsBot ? 'BOT' : widget.p1Name,
+            name: widget.p1Name,
             score: widget.score1,
             player: 1,
             tag: widget.winner == 1 ? 'WINNER' : 'HARVEST',
