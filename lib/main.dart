@@ -1,28 +1,90 @@
 import 'package:flutter/material.dart';
-import 'package:wajiha_game_core/wajiha_game_core.dart';
-import 'game_screen.dart';
+import 'package:flutter/services.dart';
+import 'src/artisan/palette.dart';
+import 'src/audio/audio_service.dart';
+import 'src/screens/main_menu.dart';
+import 'src/settings/app_settings.dart';
 
-void main() => runApp(const MancalaApp());
+/// Mancala — Artisan Mancala edition.
+///
+/// Hand-carved African artisan woodwork: dark walnut board, concave pits,
+/// polished glass stones. Clean architecture: engine / AI / audio / settings
+/// / artisan UI are fully separated; the game rules live in the pure-Dart
+/// [MancalaEngine] and match RULES.md exactly.
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
 
-class MancalaApp extends StatelessWidget {
-  const MancalaApp({super.key});
+  // Warm, sunlit presentation: edge-to-edge, no system chrome flash.
+  SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+    statusBarColor: Colors.transparent,
+    systemNavigationBarColor: Colors.transparent,
+    statusBarIconBrightness: Brightness.light,
+    systemNavigationBarIconBrightness: Brightness.light,
+  ));
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.portraitDown,
+  ]);
+
+  final settings = await AppSettings.load();
+  final audio = AudioService.instance;
+  audio.applySettings(settings);
+  // Synthesize the artisan sound set in the background; the menu appears
+  // immediately and music starts as soon as the first loop is ready.
+  audio.init().then((_) {
+    audio.applySettings(settings);
+    audio.menuMusic();
+  });
+  settings.addListener(() => audio.applySettings(settings));
+
+  runApp(MancalaApp(settings: settings));
+}
+
+class MancalaApp extends StatefulWidget {
+  final AppSettings settings;
+
+  const MancalaApp({super.key, required this.settings});
+
+  @override
+  State<MancalaApp> createState() => _MancalaAppState();
+}
+
+class _MancalaAppState extends State<MancalaApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Duck all audio while backgrounded; the game screen auto-pauses itself.
+    AudioService.instance
+        .setDucked(state == AppLifecycleState.paused || state == AppLifecycleState.hidden);
+  }
 
   @override
   Widget build(BuildContext context) {
-    return GameShell(
-      variant: ShellVariant.zenStone,
+    return MaterialApp(
       title: 'Mancala',
-      tagline: 'The ancient battle of wits — sow smart, capture big! 🫘',
-      emoji: '🫘',
-      slug: 'mancala',
-      howToPlay: '• Tap one of YOUR pits to sow its seeds\n'
-          '• Seeds drop one-by-one, counter-clockwise\n'
-          '• Land your last seed in your store (right side 🏪) for a BONUS turn\n'
-          '• Land in an empty pit of yours to CAPTURE the opposite pit! 💰\n'
-          '• Game ends when one side is empty — most seeds in store wins!',
-      playerOptions: const [1, 2],
-      supportsBots: true,
-      gameBuilder: (ctx, players, cb) => MancalaScreen(players: players, callbacks: cb),
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        useMaterial3: true,
+        scaffoldBackgroundColor: ArtisanPalette.clay,
+        fontFamily: ArtisanType.body,
+        colorScheme: const ColorScheme.dark(
+          primary: ArtisanPalette.brass,
+          surface: ArtisanPalette.clay,
+        ),
+      ),
+      home: MainMenuScreen(settings: widget.settings),
     );
   }
 }
