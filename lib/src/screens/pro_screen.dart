@@ -193,16 +193,6 @@ class ProScreen extends StatelessWidget {
                     size: 13, color: ArtisanPalette.boneDim),
               ),
             )
-          else
-            ArtisanButton(
-              label: store.proProduct == null
-                  ? 'GET PRO'
-                  : 'GET PRO · ${store.proProduct!.price}',
-              icon: Icons.workspace_premium_outlined,
-              primary: true,
-              width: double.infinity,
-              onTap: () => store.buyPro(),
-            ),
           const SizedBox(height: 10),
           Center(
             child: GestureDetector(
