@@ -192,7 +192,7 @@ class ProScreen extends StatelessWidget {
                 style: ArtisanType.bodyText(
                     size: 13, color: ArtisanPalette.boneDim),
               ),
-            )
+            ),
           const SizedBox(height: 10),
           Center(
             child: GestureDetector(
